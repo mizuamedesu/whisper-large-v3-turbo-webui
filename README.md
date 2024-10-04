@@ -1,4 +1,4 @@
-# Whisper Turbo Transcription
+# whisper-large-v3-turbo-webui
 
 ## 使用方法
 
