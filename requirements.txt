@@ -1,0 +1,5 @@
+flask
+torch
+transformers
+datasets[audio]
+accelerate
