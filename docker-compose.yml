@@ -1,5 +1,4 @@
-version: '3.8'
-
+version: "3.8"
 services:
   web:
     build: .
@@ -11,4 +10,11 @@ services:
       - ./transcriptions:/app/transcriptions
     environment:
       - FLASK_ENV=development
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     command: python app.py

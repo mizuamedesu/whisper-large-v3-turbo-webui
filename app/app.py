@@ -1,32 +1,42 @@
+import torch
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
 import subprocess
-import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 import uuid
 
 app = Flask(__name__)
 
-# Whisper Turbo setup
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+def get_available_devices():
+    devices = [('cpu', 'CPU')]
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            gpu_name = torch.cuda.get_device_name(i)
+            devices.append((f'cuda:{i}', f'GPU {i}: {gpu_name}'))
+    return devices
 
-model_id = "openai/whisper-large-v3-turbo"
-model = AutoModelForSpeechSeq2Seq.from_pretrained(
-    model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
-)
-model.to(device)
+available_devices = get_available_devices()
+default_device = 'cuda:0' if len(available_devices) > 1 else 'cpu'
 
-processor = AutoProcessor.from_pretrained(model_id)
+def initialize_model(device):
+    torch_dtype = torch.float16 if 'cuda' in device else torch.float32
+    model_id = "openai/whisper-large-v3-turbo"
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
+    )
+    model.to(device)
+    processor = AutoProcessor.from_pretrained(model_id)
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        torch_dtype=torch_dtype,
+        device=device,
+    )
+    return pipe
 
-pipe = pipeline(
-    "automatic-speech-recognition",
-    model=model,
-    tokenizer=processor.tokenizer,
-    feature_extractor=processor.feature_extractor,
-    torch_dtype=torch_dtype,
-    device=device,
-)
+model_cache = {}
 
 HTML = '''
 <!DOCTYPE html>
@@ -41,6 +51,14 @@ HTML = '''
     <div class="max-w-4xl mx-auto bg-white p-8 rounded-lg shadow-md">
         <h1 class="text-3xl font-bold mb-6">Whisper Turbo 文字起こし</h1>
         <form id="uploadForm" class="mb-8">
+            <div class="mb-4">
+                <label for="deviceSelect" class="block text-sm font-medium text-gray-700 mb-2">デバイスを選択</label>
+                <select id="deviceSelect" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                    {% for device_id, device_name in available_devices %}
+                    <option value="{{ device_id }}" {% if device_id == default_device %}selected{% endif %}>{{ device_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
             <div class="mb-4">
                 <label for="fileInput" class="block text-sm font-medium text-gray-700 mb-2">音声/動画ファイルを選択</label>
                 <input type="file" id="fileInput" accept="audio/*,video/*" multiple required class="block w-full text-sm text-gray-500
@@ -70,7 +88,7 @@ HTML = '''
                     <span class="ml-2 text-gray-700">英語に翻訳</span>
                 </label>
             </div>
-            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+            <button type="submit" id="submitButton" class="w-full bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
                 文字起こし開始
             </button>
         </form>
@@ -81,20 +99,36 @@ HTML = '''
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const fileInput = document.getElementById('fileInput');
+            const deviceSelect = document.getElementById('deviceSelect');
             const languageSelect = document.getElementById('languageSelect');
             const translateCheck = document.getElementById('translateCheck');
             const resultsDiv = document.getElementById('results');
-            
+            const submitButton = document.getElementById('submitButton');
+            const formElements = document.querySelectorAll('#uploadForm input, #uploadForm select, #uploadForm button');
+
             if (fileInput.files.length === 0) {
                 alert('少なくとも1つのファイルを選択してください');
                 return;
             }
 
-            resultsDiv.innerHTML = '<p class="text-center">文字起こし中...</p>';
+            // 無効化
+            formElements.forEach(element => element.disabled = true);
+
+            // クリア previous results
+            resultsDiv.innerHTML = '';
 
             for (let file of fileInput.files) {
+                const resultDiv = document.createElement('div');
+                resultDiv.className = 'bg-gray-50 p-4 rounded-lg';
+                resultDiv.innerHTML = `
+                    <h3 class="font-bold mb-2">${file.name}</h3>
+                    <p class="mb-2 text-gray-500">文字起こし中...</p>
+                `;
+                resultsDiv.appendChild(resultDiv);
+
                 const formData = new FormData();
                 formData.append('file', file);
+                formData.append('device', deviceSelect.value);
                 formData.append('language', languageSelect.value);
                 formData.append('translate', translateCheck.checked);
 
@@ -109,8 +143,6 @@ HTML = '''
                     }
 
                     const data = await response.json();
-                    const resultDiv = document.createElement('div');
-                    resultDiv.className = 'bg-gray-50 p-4 rounded-lg';
                     resultDiv.innerHTML = `
                         <h3 class="font-bold mb-2">${file.name}</h3>
                         <p class="mb-2">${data.transcription}</p>
@@ -121,11 +153,16 @@ HTML = '''
                             ダウンロード
                         </a>
                     `;
-                    resultsDiv.appendChild(resultDiv);
                 } catch (error) {
-                    resultsDiv.innerHTML += `<p class="text-red-500">${file.name}の処理中にエラーが発生しました: ${error.message}</p>`;
+                    resultDiv.innerHTML = `
+                        <h3 class="font-bold mb-2">${file.name}</h3>
+                        <p class="text-red-500">処理中にエラーが発生しました: ${error.message}</p>
+                    `;
                 }
             }
+
+            // 再有効化
+            formElements.forEach(element => element.disabled = false);
         });
 
         function copyToClipboard(button) {
@@ -133,9 +170,13 @@ HTML = '''
             navigator.clipboard.writeText(text).then(() => {
                 const originalText = button.textContent;
                 button.textContent = 'コピーしました!';
+                button.disabled = true;
                 setTimeout(() => {
                     button.textContent = originalText;
+                    button.disabled = false;
                 }, 2000);
+            }).catch(() => {
+                alert('コピーに失敗しました');
             });
         }
     </script>
@@ -145,7 +186,7 @@ HTML = '''
 
 @app.route('/')
 def index():
-    return render_template_string(HTML)
+    return render_template_string(HTML, available_devices=available_devices, default_device=default_device)
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
@@ -155,21 +196,38 @@ def transcribe():
     if file.filename == '':
         return jsonify({"error": "ファイルが選択されていません"}), 400
     
+    device = request.form.get('device', default_device)
     language = request.form.get('language', 'auto')
     translate = request.form.get('translate', 'false').lower() == 'true'
     
     # アップロードされたファイルを保存
-    filename = file.filename
-    file_path = os.path.join('uploads', filename)
+    uploads_dir = 'uploads'
+    os.makedirs(uploads_dir, exist_ok=True)
+    filename = f"{uuid.uuid4()}_{file.filename}"
+    file_path = os.path.join(uploads_dir, filename)
     file.save(file_path)
     
     # ファイルが動画かどうかチェック
     if file.content_type.startswith('video'):
         # FFmpegを使用してWAVに変換
         output_path = os.path.join('uploads', f'{uuid.uuid4()}.wav')
-        subprocess.run(['ffmpeg', '-i', file_path, '-acodec', 'pcm_s16le', '-ar', '16000', output_path])
+        ffmpeg_result = subprocess.run(['ffmpeg', '-y', '-i', file_path, '-acodec', 'pcm_s16le', '-ar', '16000', output_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if ffmpeg_result.returncode != 0:
+            os.remove(file_path)
+            return jsonify({"error": "FFmpegによる音声抽出に失敗しました"}), 500
     else:
         output_path = file_path
+    
+    # 選択されたデバイスでモデルを初期化または取得
+    if device not in model_cache:
+        try:
+            model_cache[device] = initialize_model(device)
+        except Exception as e:
+            if file.content_type.startswith('video'):
+                os.remove(file_path)
+                os.remove(output_path)
+            return jsonify({"error": f"モデルの初期化に失敗しました: {str(e)}"}), 500
+    pipe = model_cache[device]
     
     # Whisper Turboを使用して文字起こし
     generate_kwargs = {}
@@ -178,11 +236,19 @@ def transcribe():
     if translate:
         generate_kwargs['task'] = 'translate'
     
-    result = pipe(output_path, return_timestamps=True, generate_kwargs=generate_kwargs)
+    try:
+        result = pipe(output_path, return_timestamps=True, generate_kwargs=generate_kwargs)
+    except Exception as e:
+        if file.content_type.startswith('video'):
+            os.remove(file_path)
+            os.remove(output_path)
+        return jsonify({"error": f"文字起こし中にエラーが発生しました: {str(e)}"}), 500
     
     # 文字起こし結果をファイルに保存
     transcription_id = str(uuid.uuid4())
-    transcription_path = os.path.join('transcriptions', f'{transcription_id}.txt')
+    transcriptions_dir = 'transcriptions'
+    os.makedirs(transcriptions_dir, exist_ok=True)
+    transcription_path = os.path.join(transcriptions_dir, f'{transcription_id}.txt')
     with open(transcription_path, 'w', encoding='utf-8') as f:
         f.write(result["text"])
     
@@ -196,6 +262,8 @@ def transcribe():
 @app.route('/download/<transcription_id>')
 def download(transcription_id):
     transcription_path = os.path.join('transcriptions', f'{transcription_id}.txt')
+    if not os.path.exists(transcription_path):
+        return jsonify({"error": "ファイルが見つかりません"}), 404
     return send_file(transcription_path, as_attachment=True)
 
 if __name__ == '__main__':
