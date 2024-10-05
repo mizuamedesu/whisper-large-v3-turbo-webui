@@ -20,7 +20,7 @@ docker-compose up --build
 
 ## 雑な動作確認済み環境
 
-windows11 Docker Desktop + WSL2 (Installed NVIDIA Container Toolkit) @ RTX4080 + Ryzen 9 7950x
+windows11 Docker Desktop + WSL2 (Installed NVIDIA Container Toolkit) @ RTX4080 + Ryzen 9 7950x <br>
 Ubuntu Server 24.04LTS @ GTX1080ti*2 + Ryzen 7 2700x 
 
 ## ライセンス
