@@ -23,6 +23,13 @@ docker-compose up --build
 windows11 Docker Desktop + WSL2 (Installed NVIDIA Container Toolkit) @ RTX4080 + Ryzen 9 7950x <br>
 Ubuntu Server 24.04LTS @ GTX1080ti*2 + Ryzen 7 2700x 
 
+## CloudflareTunnelで繋ぐ
+
+詳しくは自分でドキュメントを読んで欲しいのですが、CloudflareTunnelには制限があります。このアプリケーションでおそらく影響を受けるのはhttpリクエストのPayloadが100MB以下制限とコネクションタイムアウトが100秒な点です<br>
+それを回避するためにチャンクアップロートとポーリングに対応しました。<br>
+チャンクアップロードが有効な際は指定されたファイルサイズでチャンク分けを行います。<br>
+ポーリングが有効な場合はhttpコネクションを張り続けるのではなく、UUIDを用いて指定された秒数ごとにクライアントがサーバーに問い合わせるようになります。ポーリングレートは適宜調整してください(デフォルトは5秒です）
+
 ## ライセンス
 
 このプロジェクトは Apache License 2.0 の下で提供されています。詳細は [LICENSE](LICENSE) ファイルをご覧ください。
