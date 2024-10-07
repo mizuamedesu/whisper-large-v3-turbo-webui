@@ -4,6 +4,7 @@ import os
 import subprocess
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 import uuid
+import json
 
 app = Flask(__name__)
 
@@ -51,6 +52,7 @@ HTML = '''
     <div class="max-w-4xl mx-auto bg-white p-8 rounded-lg shadow-md">
         <h1 class="text-3xl font-bold mb-6">Whisper Turbo 文字起こし</h1>
         <form id="uploadForm" class="mb-8">
+            <!-- デバイス選択 -->
             <div class="mb-4">
                 <label for="deviceSelect" class="block text-sm font-medium text-gray-700 mb-2">デバイスを選択</label>
                 <select id="deviceSelect" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
@@ -59,6 +61,7 @@ HTML = '''
                     {% endfor %}
                 </select>
             </div>
+            <!-- ファイル入力 -->
             <div class="mb-4">
                 <label for="fileInput" class="block text-sm font-medium text-gray-700 mb-2">音声/動画ファイルを選択</label>
                 <input type="file" id="fileInput" accept="audio/*,video/*" multiple required class="block w-full text-sm text-gray-500
@@ -69,6 +72,7 @@ HTML = '''
                     hover:file:bg-blue-100
                 ">
             </div>
+            <!-- 言語選択 -->
             <div class="mb-4">
                 <label for="languageSelect" class="block text-sm font-medium text-gray-700 mb-2">言語を選択（任意）</label>
                 <select id="languageSelect" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
@@ -82,11 +86,23 @@ HTML = '''
                     <option value="es">スペイン語</option>
                 </select>
             </div>
+            <!-- 翻訳オプション -->
             <div class="mb-4">
                 <label class="inline-flex items-center">
                     <input type="checkbox" id="translateCheck" class="form-checkbox h-5 w-5 text-blue-600">
                     <span class="ml-2 text-gray-700">英語に翻訳</span>
                 </label>
+            </div>
+            <!-- チャンクアップロード設定 -->
+            <div class="mb-4">
+                <label class="inline-flex items-center">
+                    <input type="checkbox" id="chunkUploadCheck" class="form-checkbox h-5 w-5 text-blue-600" checked>
+                    <span class="ml-2 text-gray-700">チャンクアップロードを有効にする</span>
+                </label>
+            </div>
+            <div class="mb-4" id="chunkSizeContainer">
+                <label for="chunkSizeInput" class="block text-sm font-medium text-gray-700 mb-2">チャンクサイズ（MB）</label>
+                <input type="number" id="chunkSizeInput" min="1" value="99" class="mt-1 block w-full pl-3 pr-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
             </div>
             <button type="submit" id="submitButton" class="w-full bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
                 文字起こし開始
@@ -96,12 +112,19 @@ HTML = '''
     </div>
 
     <script>
+        document.getElementById('chunkUploadCheck').addEventListener('change', (e) => {
+            const chunkSizeContainer = document.getElementById('chunkSizeContainer');
+            chunkSizeContainer.style.display = e.target.checked ? 'block' : 'none';
+        });
+
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const fileInput = document.getElementById('fileInput');
             const deviceSelect = document.getElementById('deviceSelect');
             const languageSelect = document.getElementById('languageSelect');
             const translateCheck = document.getElementById('translateCheck');
+            const chunkUploadCheck = document.getElementById('chunkUploadCheck');
+            const chunkSizeInput = document.getElementById('chunkSizeInput');
             const resultsDiv = document.getElementById('results');
             const submitButton = document.getElementById('submitButton');
             const formElements = document.querySelectorAll('#uploadForm input, #uploadForm select, #uploadForm button');
@@ -117,6 +140,10 @@ HTML = '''
             // クリア previous results
             resultsDiv.innerHTML = '';
 
+            const useChunkUpload = chunkUploadCheck.checked;
+            const chunkSizeMB = parseInt(chunkSizeInput.value, 10) || 99;
+            const chunkSize = chunkSizeMB * 1024 * 1024; // バイト単位
+
             for (let file of fileInput.files) {
                 const resultDiv = document.createElement('div');
                 resultDiv.className = 'bg-gray-50 p-4 rounded-lg';
@@ -126,30 +153,21 @@ HTML = '''
                 `;
                 resultsDiv.appendChild(resultDiv);
 
-                const formData = new FormData();
-                formData.append('file', file);
-                formData.append('device', deviceSelect.value);
-                formData.append('language', languageSelect.value);
-                formData.append('translate', translateCheck.checked);
-
                 try {
-                    const response = await fetch('/transcribe', {
-                        method: 'POST',
-                        body: formData
-                    });
-
-                    if (!response.ok) {
-                        throw new Error('サーバーエラー');
+                    let transcriptionData;
+                    if (useChunkUpload) {
+                        transcriptionData = await uploadFileInChunks(file, chunkSize, deviceSelect.value, languageSelect.value, translateCheck.checked);
+                    } else {
+                        transcriptionData = await uploadFile(file, deviceSelect.value, languageSelect.value, translateCheck.checked);
                     }
 
-                    const data = await response.json();
                     resultDiv.innerHTML = `
                         <h3 class="font-bold mb-2">${file.name}</h3>
-                        <p class="mb-2">${data.transcription}</p>
+                        <p class="mb-2">${transcriptionData.transcription}</p>
                         <button onclick="copyToClipboard(this)" class="bg-green-500 hover:bg-green-700 text-white font-bold py-1 px-2 rounded mr-2">
                             コピー
                         </button>
-                        <a href="/download/${data.id}" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded">
+                        <a href="/download/${transcriptionData.id}" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded">
                             ダウンロード
                         </a>
                     `;
@@ -164,6 +182,79 @@ HTML = '''
             // 再有効化
             formElements.forEach(element => element.disabled = false);
         });
+
+        async function uploadFile(file, device, language, translate) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('device', device);
+            formData.append('language', language);
+            formData.append('translate', translate);
+
+            const response = await fetch('/transcribe', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'サーバーエラー');
+            }
+
+            return await response.json();
+        }
+
+        async function uploadFileInChunks(file, chunkSize, device, language, translate) {
+            const totalChunks = Math.ceil(file.size / chunkSize);
+            const fileId = generateUUID();
+
+            for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                const start = chunkIndex * chunkSize;
+                const end = Math.min(start + chunkSize, file.size);
+                const chunk = file.slice(start, end);
+
+                const formData = new FormData();
+                formData.append('file', chunk);
+                formData.append('device', device);
+                formData.append('language', language);
+                formData.append('translate', translate);
+                formData.append('fileId', fileId);
+                formData.append('chunkIndex', chunkIndex);
+                formData.append('totalChunks', totalChunks);
+
+                const response = await fetch('/transcribe_chunk', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'サーバーエラー');
+                }
+            }
+
+            // 全チャンクがアップロードされた後に、サーバーで再構築と文字起こしを行います
+            const finalResponse = await fetch('/transcribe_finalize', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ fileId })
+            });
+
+            if (!finalResponse.ok) {
+                const errorData = await finalResponse.json();
+                throw new Error(errorData.error || 'サーバーエラー');
+            }
+
+            return await finalResponse.json();
+        }
+
+        function generateUUID() { // RFC4122 version 4 compliant UUID
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
 
         function copyToClipboard(button) {
             const text = button.parentElement.querySelector('p').textContent;
@@ -190,23 +281,24 @@ def index():
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
+    # 従来の一括アップロード処理
     if 'file' not in request.files:
         return jsonify({"error": "ファイルがありません"}), 400
     file = request.files['file']
     if file.filename == '':
         return jsonify({"error": "ファイルが選択されていません"}), 400
-    
+
     device = request.form.get('device', default_device)
     language = request.form.get('language', 'auto')
     translate = request.form.get('translate', 'false').lower() == 'true'
-    
+
     # アップロードされたファイルを保存
     uploads_dir = 'uploads'
     os.makedirs(uploads_dir, exist_ok=True)
     filename = f"{uuid.uuid4()}_{file.filename}"
     file_path = os.path.join(uploads_dir, filename)
     file.save(file_path)
-    
+
     # ファイルが動画かどうかチェック
     if file.content_type.startswith('video'):
         # FFmpegを使用してWAVに変換
@@ -217,7 +309,7 @@ def transcribe():
             return jsonify({"error": "FFmpegによる音声抽出に失敗しました"}), 500
     else:
         output_path = file_path
-    
+
     # 選択されたデバイスでモデルを初期化または取得
     if device not in model_cache:
         try:
@@ -228,14 +320,14 @@ def transcribe():
                 os.remove(output_path)
             return jsonify({"error": f"モデルの初期化に失敗しました: {str(e)}"}), 500
     pipe = model_cache[device]
-    
+
     # Whisper Turboを使用して文字起こし
     generate_kwargs = {}
     if language != 'auto':
         generate_kwargs['language'] = language
     if translate:
         generate_kwargs['task'] = 'translate'
-    
+
     try:
         result = pipe(output_path, return_timestamps=True, generate_kwargs=generate_kwargs)
     except Exception as e:
@@ -243,7 +335,7 @@ def transcribe():
             os.remove(file_path)
             os.remove(output_path)
         return jsonify({"error": f"文字起こし中にエラーが発生しました: {str(e)}"}), 500
-    
+
     # 文字起こし結果をファイルに保存
     transcription_id = str(uuid.uuid4())
     transcriptions_dir = 'transcriptions'
@@ -251,13 +343,128 @@ def transcribe():
     transcription_path = os.path.join(transcriptions_dir, f'{transcription_id}.txt')
     with open(transcription_path, 'w', encoding='utf-8') as f:
         f.write(result["text"])
-    
+
     # クリーンアップ
     os.remove(file_path)
     if file.content_type.startswith('video'):
         os.remove(output_path)
-    
+
     return jsonify({"transcription": result["text"], "id": transcription_id})
+
+@app.route('/transcribe_chunk', methods=['POST'])
+def transcribe_chunk():
+    """
+    チャンクを受信して一時ファイルとして保存します。
+    """
+    if 'file' not in request.files:
+        return jsonify({"error": "ファイルがありません"}), 400
+    chunk = request.files['file']
+    if chunk.filename == '':
+        return jsonify({"error": "ファイルが選択されていません"}), 400
+
+    device = request.form.get('device', default_device)
+    language = request.form.get('language', 'auto')
+    translate = request.form.get('translate', 'false').lower() == 'true'
+    file_id = request.form.get('fileId')
+    chunk_index = int(request.form.get('chunkIndex', 0))
+    total_chunks = int(request.form.get('totalChunks', 1))
+
+    if not file_id:
+        return jsonify({"error": "fileIdが提供されていません"}), 400
+
+    # 一時チャンクディレクトリ
+    temp_dir = os.path.join('temp_chunks', file_id)
+    os.makedirs(temp_dir, exist_ok=True)
+    chunk_filename = os.path.join(temp_dir, f'chunk_{chunk_index}')
+    chunk.save(chunk_filename)
+
+    return jsonify({"message": f"チャンク {chunk_index + 1}/{total_chunks} を受信しました"}), 200
+
+@app.route('/transcribe_finalize', methods=['POST'])
+def transcribe_finalize():
+    """
+    すべてのチャンクがアップロードされた後、ファイルを再構築し文字起こしを行います。
+    """
+    data = request.get_json()
+    if not data or 'fileId' not in data:
+        return jsonify({"error": "fileIdが提供されていません"}), 400
+
+    file_id = data['fileId']
+    temp_dir = os.path.join('temp_chunks', file_id)
+    if not os.path.exists(temp_dir):
+        return jsonify({"error": "チャンクが見つかりません"}), 400
+
+    try:
+        # チャンクを番号順に並べて結合
+        chunk_files = sorted([f for f in os.listdir(temp_dir) if f.startswith('chunk_')], key=lambda x: int(x.split('_')[1]))
+        if not chunk_files:
+            return jsonify({"error": "チャンクがありません"}), 400
+
+        reconstructed_file_path = os.path.join('uploads', f'{file_id}_reconstructed')
+        with open(reconstructed_file_path, 'wb') as outfile:
+            for chunk_file in chunk_files:
+                chunk_path = os.path.join(temp_dir, chunk_file)
+                with open(chunk_path, 'rb') as infile:
+                    outfile.write(infile.read())
+
+        # ファイルのMIMEタイプを判定（ここでは簡易的に拡張子で判定）
+        # 実際にはより堅牢な方法を推奨します
+        _, ext = os.path.splitext(file_id)
+        # 仮に拡張子がわからない場合は音声として扱う
+        is_video = False
+        if reconstructed_file_path.lower().endswith(('.mp4', '.mkv', '.avi', '.mov')):
+            is_video = True
+
+        # ファイルが動画かどうかチェック
+        if is_video:
+            # FFmpegを使用してWAVに変換
+            output_wav_path = os.path.join('uploads', f'{uuid.uuid4()}.wav')
+            ffmpeg_result = subprocess.run(['ffmpeg', '-y', '-i', reconstructed_file_path, '-acodec', 'pcm_s16le', '-ar', '16000', output_wav_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if ffmpeg_result.returncode != 0:
+                return jsonify({"error": "FFmpegによる音声抽出に失敗しました"}), 500
+            processing_path = output_wav_path
+        else:
+            processing_path = reconstructed_file_path
+
+        # デバイスの取得
+        device = request.form.get('device', default_device)
+        language = request.form.get('language', 'auto')
+        translate = request.form.get('translate', 'false').lower() == 'true'
+
+        # モデルの初期化または取得
+        if device not in model_cache:
+            model_cache[device] = initialize_model(device)
+        pipe = model_cache[device]
+
+        # Whisper Turboを使用して文字起こし
+        generate_kwargs = {}
+        if language != 'auto':
+            generate_kwargs['language'] = language
+        if translate:
+            generate_kwargs['task'] = 'translate'
+
+        result = pipe(processing_path, return_timestamps=True, generate_kwargs=generate_kwargs)
+
+        # 文字起こし結果をファイルに保存
+        transcription_id = str(uuid.uuid4())
+        transcriptions_dir = 'transcriptions'
+        os.makedirs(transcriptions_dir, exist_ok=True)
+        transcription_path = os.path.join(transcriptions_dir, f'{transcription_id}.txt')
+        with open(transcription_path, 'w', encoding='utf-8') as f:
+            f.write(result["text"])
+
+        # クリーンアップ
+        os.remove(reconstructed_file_path)
+        if is_video:
+            os.remove(output_wav_path)
+        # チャンク一時ファイルの削除
+        for chunk_file in chunk_files:
+            os.remove(os.path.join(temp_dir, chunk_file))
+        os.rmdir(temp_dir)
+
+        return jsonify({"transcription": result["text"], "id": transcription_id})
+    except Exception as e:
+        return jsonify({"error": f"文字起こし中にエラーが発生しました: {str(e)}"}), 500
 
 @app.route('/download/<transcription_id>')
 def download(transcription_id):
@@ -269,4 +476,5 @@ def download(transcription_id):
 if __name__ == '__main__':
     os.makedirs('uploads', exist_ok=True)
     os.makedirs('transcriptions', exist_ok=True)
+    os.makedirs('temp_chunks', exist_ok=True)
     app.run(host='0.0.0.0', port=5000)
